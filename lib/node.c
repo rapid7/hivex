@@ -569,14 +569,14 @@ _find_child_in_lf(hive_h *h, struct ntreg_lf_record *block, const char *nname)
         continue;
       }
       if (STRCASEEQ (name, nname)) {
-	DEBUG(2,"Found child in LF");
+	DEBUG(2, "Found child in LF");
         free(name);
         return offset;
       }
       DEBUG(2, "Name hint mismatch");
       free(name);
     }
-    DEBUG(2,"No matches in LF");
+    DEBUG(2, "No matches in LF");
   }
   return 0;
 }
