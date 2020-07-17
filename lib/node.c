@@ -553,9 +553,62 @@ hivex_node_nr_children (hive_h *h, hive_node_h node)
   return nr_subkeys_in_nk;
 }
 
+
+hive_node_h
+_find_child_in_lf(hive_h *h, struct ntreg_lf_record *block, const char *nname)
+{
+  DEBUG(2, "Looking for child in LF");
+  for (size_t i = 0; i < block->nr_keys; ++i) {
+    char *hash = block->keys[i].hash;
+    if (strncasecmp (block->keys[i].hash, nname, 4) == 0) {
+      hive_node_h offset = block->keys[i].offset + 0x1000;
+      //ensure name in nk block matches nname (collision?)
+      char *name = hivex_node_name(h, offset);
+      if (!name) {
+        free(name);
+        continue;
+      }
+      if (STRCASEEQ (name, nname)) {
+	DEBUG(2,"Found child in LF");
+        free(name);
+        return offset;
+      }
+      DEBUG(2, "Name hint mismatch");
+      free(name);
+    }
+    DEBUG(2,"No matches in LF");
+  }
+  return 0;
+}
+
+hive_node_h
+_find_child_in_li(hive_h *h, struct ntreg_ri_record *block, const char *nname)
+{
+  hive_node_h offset = 0;
+  DEBUG(2, "Looking for child in LI");
+  for (size_t i = 0; i < block->nr_offsets; ++i) {
+    offset = block->offset[i] + 0x1000;
+    char *name = hivex_node_name(h, offset);
+    if (!name) {
+      free(name);
+      continue;
+    }
+    if (STRCASEEQ(name, nname)) {
+      DEBUG(2, "Found match in LI");
+      free(name);
+      return offset;
+    }
+    free(name);
+  }
+  DEBUG(2, "No matches in LI");
+  return 0;
+}
+
+
 hive_node_h
 _find_child_in_lh(hive_h *h, struct ntreg_lf_record *block, const char *nname)
 {
+  DEBUG(2, "Looking for child in LH");
   char hash[4];
   calc_hash("lh", nname, &hash);
   for (size_t i = 0; i < block->nr_keys ; ++i) {
@@ -577,6 +630,33 @@ _find_child_in_lh(hive_h *h, struct ntreg_lf_record *block, const char *nname)
   return 0;
 }
 
+
+
+hive_node_h
+_find_child_in_ri(hive_h *h, struct ntreg_ri_record *ri_block, const char *nname)
+{
+  DEBUG(2, "Looking for child in RI");
+  hive_node_h offset = 0;
+  struct ntreg_ri_record *ri = (struct ntreg_ri_record *) ri_block;
+  for (size_t i=0; i < ri->nr_offsets; ++i){
+    struct ntreg_hbin_block *block =
+      (struct ntreg_hbin_block *) ((char *) h->addr + ri->offset[i] + 0x1000);
+    if (strncmp(block->id, "lh", 2) == 0) {
+      offset = _find_child_in_lh(h, (struct ntreg_lf_record*) block, nname);
+      if (offset != 0) return offset;
+    } else if (strncmp(block->id, "lf", 2) == 0) {
+      offset = _find_child_in_lf(h, (struct ntreg_lf_record*) block, nname);
+      if (offset != 0) return offset;
+    } else if (strncmp(block->id, "li", 2) == 0) {
+      offset = _find_child_in_li(h, (struct ntreg_ri_record*) block, nname);
+      if (offset != 0) return offset;
+    }
+  }
+  return offset;
+}
+
+
+
 /* Very inefficient, but at least having a separate API call
  * allows us to make it more efficient in future.
  * Note:
@@ -587,10 +667,8 @@ _find_child_in_lh(hive_h *h, struct ntreg_lf_record *block, const char *nname)
 hive_node_h
 hivex_node_get_child (hive_h *h, hive_node_h node, const char *nname)
 {
-  hive_node_h *children = NULL;
   char *name = NULL;
   hive_node_h ret = 0;
-
   //Check if subkey offset is LH block with subkeys in it
   if (!IS_VALID_BLOCK (h, node) || !block_id_eq (h, node, "nk")) {
     SET_ERRNO (EINVAL, "invalid block or not an 'nk' block");
@@ -610,26 +688,12 @@ hivex_node_get_child (hive_h *h, hive_node_h node, const char *nname)
     (struct ntreg_hbin_block *) ((char *) h->addr + subkey_lf);
   if (strncmp(block->id, "lh", 2) == 0) {
     return _find_child_in_lh(h, (struct ntreg_lf_record *)block, nname);
-  } else {
-    // Subkey list is either RI, LI or LF. Continue with brute force
-    children = hivex_node_children (h, node);
-    if (!children) goto error;
-
-    size_t i;
-    for (i = 0; children[i] != 0; ++i) {
-      name = hivex_node_name (h, children[i]);
-      if (!name) goto error;
-      if (STRCASEEQ (name, nname)) {
-	ret = children[i];
-	break;
-      }
-      free (name); name = NULL;
-    }
-
-  error:
-    free (children);
-    free (name);
-    return ret;
+  } else if (strncmp(block->id, "ri", 2) == 0) {
+    return _find_child_in_ri(h, (struct ntreg_ri_record *)block, nname);
+  } else if (strncmp(block->id, "li", 2) == 0) {
+    return _find_child_in_li(h, (struct ntreg_ri_record *)block, nname);
+  } else if (strncmp(block->id, "lf", 2) == 0) {
+    return _find_child_in_lf(h, (struct ntreg_lf_record *)block, nname);
   }
 }
 
