@@ -657,12 +657,8 @@ _find_child_in_ri(hive_h *h, struct ntreg_ri_record *ri_block, const char *nname
 
 
 
-/* Very inefficient, but at least having a separate API call
- * allows us to make it more efficient in future.
- * Note:
- *  LH lookups are optimized
- * TODO:
- *  LI, RI, LF lookup optimization
+/* This method is reasonably optimized. Possible to optimize with a binary
+   search on LF and LI nodes if more optimization needed
  */
 hive_node_h
 hivex_node_get_child (hive_h *h, hive_node_h node, const char *nname)
