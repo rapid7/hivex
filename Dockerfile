@@ -1,5 +1,4 @@
 FROM ubuntu
-FROM python:3.7.3
 
 ARG DEBIAN_FRONTEND=noninteractive
 
