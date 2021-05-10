@@ -926,6 +926,8 @@ struct hivex_visitor {
 
 extern int hivex_visit (hive_h *h, const struct hivex_visitor *visitor, size_t len, void *opaque, int flags);
 extern int hivex_visit_node (hive_h *h, hive_node_h node, const struct hivex_visitor *visitor, size_t len, void *opaque, int flags);
+extern int hivex_node_add_children(hive_h *h, hive_node_h parent, const char **names, int num_names);
+extern int hivex_node_delete_children(hive_h *h, hive_node_h* nodes, int num_nodes);
 
 ";
 
@@ -1529,7 +1531,9 @@ and generate_linker_script () =
 
   let globals = [
     "hivex_visit";
-    "hivex_visit_node"
+    "hivex_visit_node";
+    "hivex_node_add_children";
+    "hivex_node_delete_children"
   ] in
 
   let functions =
@@ -2973,6 +2977,84 @@ get_values (PyObject *v, py_set_values *ret)
 }
 
 static PyObject *
+py_hivex_node_add_children (PyObject *self, PyObject *args)
+{
+  PyObject *py_r;
+  hive_node_h r;
+  hive_h *h;
+  PyObject *py_h;
+  long parent;
+  PyObject *names_obj;
+  int num_children = 0;
+  char const **names = NULL;
+
+  if (!PyArg_ParseTuple (args, (char *) \"OlO:hivex_node_add_children\", &py_h, &parent, &names_obj))
+    return NULL;
+  h = get_handle (py_h);
+  PyObject *iter = PyObject_GetIter(names_obj);
+  if (!iter) { return NULL; } //Not a list?
+  for(;;) {
+    PyObject *next = PyIter_Next(iter);
+    if (!next) break;
+    if (!PyUnicode_Check(next)){ return NULL; } // Non unicode string passed?
+    num_children++;
+    names = realloc (names, sizeof(char*) * num_children);
+    const char* name = PyUnicode_AsUTF8(next);
+    names[num_children-1] = name;
+  }
+  r = hivex_node_add_children (h, parent, names);
+  //TODO: What else needs to be freed?
+  free(names);
+  free(iter);
+  if (r == -1) {
+    PyErr_SetString (PyExc_RuntimeError,
+                     strerror (errno));
+    return NULL;
+  }
+  Py_INCREF (Py_None);
+  py_r = Py_None;
+  return py_r;
+}
+
+static PyObject *
+py_hivex_node_delete_children (PyObject *self, PyObject *args)
+{
+  PyObject *py_r;
+  int r;
+  hive_h *h;
+  PyObject *py_h;
+  PyObject *nodes_obj;
+  unsigned long *nodes = NULL;
+  int num_nodes = 0;
+
+  if (!PyArg_ParseTuple (args, (char *) \"OO:hivex_node_delete_children\", &py_h, &nodes_obj))
+    return NULL;
+  h = get_handle (py_h);
+  PyObject *iter = PyObject_GetIter(nodes_obj);
+  if (!iter) { return NULL; } //Not a list?
+  for(;;) {
+    PyObject *next = PyIter_Next(iter);
+    if (!next) break;
+    if (!PyLong_Check(next)){ return NULL; } // Non unicode string passed?
+    num_nodes++;
+    nodes = realloc (nodes, sizeof(long) * num_nodes);
+    long node = PyLong_AsLong(next);
+    nodes[num_nodes-1] = node;
+  }
+  r = hivex_node_delete_children (h, nodes, num_nodes);
+  //TODO: What to free?
+  if (r == -1) {
+    PyErr_SetString (PyExc_RuntimeError,
+                     strerror (errno));
+    return NULL;
+  }
+ 
+  Py_INCREF (Py_None);
+  py_r = Py_None;
+  return py_r;
+}
+ 
+static PyObject *
 put_string_list (char * const * const argv)
 {
   PyObject *list;
@@ -3276,6 +3358,8 @@ put_val_type (char *val, size_t len, hive_type t)
       pr "  { (char *) \"%s\", py_hivex_%s, METH_VARARGS, NULL },\n"
         name name
   ) functions;
+  pr "  { (char *) \"node_add_children\", py_hivex_node_add_children, METH_VARARGS, NULL },\n";
+  pr "  { (char *) \"node_delete_children\", py_hivex_node_delete_children, METH_VARARGS, NULL },\n";
   pr "  { NULL, NULL, 0, NULL }\n";
   pr "};\n";
   pr "\n";
