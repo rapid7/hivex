@@ -720,6 +720,11 @@ hivex_close (hive_h *h)
       h->iconv_cache[t].handle = NULL;
     }
   }
+  while (h->free_blocks != NULL) {
+      unallocated_block *next = h->free_blocks->next;
+      free(h->free_blocks);
+      h->free_blocks = next;
+  }
   free (h);
 
   return r;
