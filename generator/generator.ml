@@ -2887,15 +2887,7 @@ get_value (PyObject *v, hive_set_value *ret)
     PyErr_SetString (PyExc_KeyError, \"no 'key' element in dictionary\");
     return -1;
   }
-  if (PyUnicode_Check (obj)) {
-    /* TODO: use PyUnicode_DecodeASCII or PyUnicode_AsUTF16String instead? */
-    bytes = PyUnicode_AsUTF8String (obj);
-    if (bytes == NULL) {
-      PyErr_SetString (PyExc_ValueError, \"failed to decode 'key'\");
-      return -1;
-    }
-    ret->key = PyBytes_AS_STRING (bytes);
-  } else if (PyBytes_Check (obj)) {
+  if (PyBytes_Check (obj)) {
     ret->key = PyBytes_AS_STRING (obj);
   } else {
     PyErr_SetString (PyExc_TypeError, \"expected bytes type for 'key'\");

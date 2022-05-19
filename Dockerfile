@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y \
     pkg-config \
     ocaml \
     m4 \
-    libreadline5 \
+    libreadline-dev \
     gettext \
     autopoint \
     cpio \
@@ -38,16 +38,16 @@ RUN apt-get update && apt-get install -y \
     libyara-dev \
     supermin \
     qemu \
-    python \
+    python3 \
     python3-dev \
     perl \
     libperl-dev
 
-RUN rm /usr/bin/python && ln -s /usr/bin/python3 /usr/bin/python
+RUN rm -f /usr/bin/python && ln -s /usr/bin/python3 /usr/bin/python
 
 # build hivex
 RUN cpan install Test::More ExtUtils::MakeMaker IO::Stringy
-RUN git clone https://github.com/rapid7/hivex.git /root/hivex
+COPY . /root/hivex
 WORKDIR "/root/hivex"
 
 RUN ./autogen.sh
