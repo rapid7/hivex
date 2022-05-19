@@ -131,3 +131,12 @@ Makefile.in
 /stamp-h1
 /xml/*.1
 /xml/hivexml
+/GNUmakefile
+/maint.mk
+
+### IntelliJ IDEA ###
+.idea
+*.iws
+*.iml
+*.ipr
+
