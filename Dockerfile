@@ -1,4 +1,4 @@
-FROM ubuntu
+FROM ubuntu:18.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 
@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y \
     pkg-config \
     ocaml \
     m4 \
-    libreadline-dev \
+    libreadline5 \
     gettext \
     autopoint \
     cpio \
@@ -38,12 +38,12 @@ RUN apt-get update && apt-get install -y \
     libyara-dev \
     supermin \
     qemu \
-    python3 \
+    python \
     python3-dev \
     perl \
     libperl-dev
 
-RUN rm -f /usr/bin/python && ln -s /usr/bin/python3 /usr/bin/python
+RUN rm /usr/bin/python && ln -s /usr/bin/python3 /usr/bin/python
 
 # build hivex
 RUN cpan install Test::More ExtUtils::MakeMaker IO::Stringy
