@@ -1,0 +1,17 @@
+---
+info:
+  title: Hivex
+  description: windows registry hive extraction library.  PLEASE DO NOT USE GITHUB
+    FOR ISSUES OR PULL REQUESTS. See the website for how to file a bug or contact
+    us.  http://libguestfs.org
+  x-cortex-git:
+    github:
+      alias: r7org
+      repository: rapid7/hivex
+  x-cortex-tag: hivex
+  x-cortex-type: service
+  x-cortex-domain-parents:
+  - tag: platform
+openapi: 3.0.1
+servers:
+- url: "/"
