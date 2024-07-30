@@ -1217,3 +1217,376 @@ hivex_node_set_value (hive_h *h, hive_node_h node,
 
   return retval;
 }
+
+hive_node_h
+_create_nk_record(hive_h *h, hive_node_h parent, const char *name){
+  DEBUG(2,"Creating child: %s", name);
+  CHECK_WRITABLE (0);
+
+  if (!IS_VALID_BLOCK (h, parent) || !block_id_eq (h, parent, "nk")) {
+    SET_ERRNO (EINVAL, "invalid block or not an 'nk' block");
+    return 0;
+  }
+
+  if (name == NULL || strlen (name) == 0) {
+    SET_ERRNO (EINVAL, "name is NULL or zero length");
+    return 0;
+  }
+
+  if (hivex_node_get_child (h, parent, name) != 0) {
+    SET_ERRNO (EEXIST, "a child with that name exists already");
+    return 0;
+  }
+
+  size_t recoded_name_len;
+  int use_utf16 = 0;
+  char *recoded_name =
+    _hivex_encode_string (h, name, &recoded_name_len, &use_utf16);
+  if (recoded_name == NULL) {
+    SET_ERRNO (EINVAL, "malformed name");
+    return 0;
+  }
+
+  /* Create the new nk-record. */
+  static const char nk_id[2] = { 'n', 'k' };
+  size_t seg_len = sizeof (struct ntreg_nk_record) + recoded_name_len;
+  hive_node_h nkoffset = allocate_block (h, seg_len, nk_id);
+  if (nkoffset == 0) {
+    free (recoded_name);
+    return 0;
+  }
+
+  DEBUG (2, "allocated new nk-record for child at 0x%zx", nkoffset);
+
+  struct ntreg_nk_record *nk =
+    (struct ntreg_nk_record *) ((char *) h->addr + nkoffset);
+  if (use_utf16)
+    nk->flags = htole16 (0x0000);
+  else
+    nk->flags = htole16 (0x0020);
+  nk->parent = htole32 (parent - 0x1000);
+  nk->subkey_lf = htole32 (0xffffffff);
+  nk->subkey_lf_volatile = htole32 (0xffffffff);
+  nk->vallist = htole32 (0xffffffff);
+  nk->classname = htole32 (0xffffffff);
+  nk->name_len = htole16 (recoded_name_len);
+  memcpy (nk->name, recoded_name, recoded_name_len);
+  free (recoded_name);
+
+  /* Inherit parent sk. */
+  struct ntreg_nk_record *parent_nk =
+    (struct ntreg_nk_record *) ((char *) h->addr + parent);
+  size_t parent_sk_offset = le32toh (parent_nk->sk);
+  parent_sk_offset += 0x1000;
+  if (IS_VALID_BLOCK (h, parent_sk_offset) &&
+      block_id_eq (h, parent_sk_offset, "sk")) {
+    struct ntreg_sk_record *sk =
+      (struct ntreg_sk_record *) ((char *) h->addr + parent_sk_offset);
+    sk->refcount = htole32 (le32toh (sk->refcount) + 1);
+    nk->sk = htole32 (parent_sk_offset - 0x1000);
+  } else {
+    nk->sk = 0;
+  }
+
+  /* Inherit parent timestamp. */
+  nk->timestamp = parent_nk->timestamp;
+
+  size_t utf16_len = use_utf16 ? recoded_name_len : recoded_name_len * 2;
+  if (le16toh (parent_nk->max_subkey_name_len) < utf16_len)
+    parent_nk->max_subkey_name_len = htole16 (utf16_len);
+
+  return nkoffset;
+}
+
+/* Create a completely new lh-record containing nodes */
+static size_t
+new_lh_record_with_children(hive_h *h, hive_node_h *nodes, const char **names, size_t num_nodes)
+{
+  DEBUG(2, "Creating a new lh record with %zu nodes", num_nodes);
+  assert(num_nodes <= UINT16_MAX);
+
+  static const char id[2] = { 'l', 'h' };
+  size_t seg_len = sizeof (struct ntreg_lf_record) + (num_nodes - 1) * 8;
+  size_t offset = allocate_block (h, seg_len, id);
+  if (offset == 0)
+    return 0;
+
+  struct ntreg_lf_record *lh =
+    (struct ntreg_lf_record *) ((char *) h->addr + offset);
+  lh->nr_keys = htole16 (num_nodes);
+  for (int i=0; i< num_nodes; ++i) {
+    lh->keys[i].offset = htole32 (nodes[i] - 0x1000);
+    calc_hash ("lh", names[i], lh->keys[i].hash);
+  }
+  return offset;
+}
+
+void get_offset_and_hash(hive_h *h, size_t index, struct ntreg_lf_record *old_lf,
+			 struct ntreg_ri_record *old_li, size_t *offset, char *hash){
+  if (old_lf) {
+    *offset = old_lf->keys[index].offset + 0x1000;
+    hash = old_lf->keys[index].hash;
+  } else { //old_li
+    *offset = old_li->offset[index] + 0x1000;
+    const char *old_name = hivex_node_name (h, *offset);
+    calc_hash("lh", old_name, &hash);
+  }
+}
+
+static size_t
+_fresh_lh_block(hive_h *h, size_t old_offs, const char** names, size_t *nkoffsets,
+		size_t start_pos, size_t end_pos)
+{
+  struct ntreg_lf_record *old_lf = NULL;
+  struct ntreg_ri_record *old_li = NULL;
+  size_t nr_keys = 0;
+  static const char id[2] = { 'l', 'h' };
+  size_t keys_to_add = end_pos - start_pos;
+  DEBUG(2, "Creating a new LH block with merged nodes.");
+  if (block_id_eq (h, old_offs, "lf") || block_id_eq (h, old_offs, "lh")) {
+    old_lf = (struct ntreg_lf_record *) ((char *) h->addr + old_offs);
+    nr_keys = le16toh (old_lf->nr_keys);
+  } else if (block_id_eq(h, old_offs, "li")) {
+    old_li = (struct ntreg_ri_record *) ((char *) h->addr + old_offs);
+    nr_keys = le16toh (old_li->nr_offsets);
+  }
+  size_t total_keys = nr_keys + keys_to_add;
+  DEBUG(2, "Existing keys %zu, adding %zu new keys", nr_keys, keys_to_add);
+  if (total_keys >= UINT16_MAX) {
+    SET_ERRNO(EOVERFLOW,
+	      "cannot create a new record because it would contain more than maximum subkeys (%zu)",
+	      total_keys);
+    return 0;
+  }
+  size_t seg_len = sizeof (struct ntreg_lf_record) + (total_keys - 1) * 8;
+  size_t offset = allocate_block(h, seg_len, id);
+  if (offset == 0) return 0; //failed to allocate block of required size
+
+  struct ntreg_lf_record *lh =
+    (struct ntreg_lf_record *) ((char *) h->addr + offset);
+  lh->nr_keys = htole16 (total_keys);
+  size_t new_key_index = start_pos; //iterator for new keys
+  size_t old_key_index = 0; //iterator for old lf keys
+  hive_node_h old_offset = 0;
+  char *old_hash = malloc(sizeof(char) * 4);
+  get_offset_and_hash(h, old_key_index, old_lf, old_li, &old_offset, old_hash);
+  for(int pos=0; pos<total_keys; pos++){
+    // If we have new keys, and they come before the old key name or there are no more old keys
+    if (new_key_index < keys_to_add &&
+	compare_name_with_nk_name(h, names[new_key_index], old_offset) < 0 ||
+	old_key_index >= nr_keys) {
+      DEBUG(2, "Inserting new node: 0x%zx in position: %u", nkoffsets[new_key_index], pos);
+      lh->keys[pos].offset = htole32 (nkoffsets[new_key_index] - 0x1000);
+      calc_hash("lh", names[new_key_index], lh->keys[pos].hash);
+      new_key_index++;
+    } else {
+      DEBUG(2, "Inserting old node: 0x%zx in position: %u", old_offset, pos);
+      lh->keys[pos].offset = old_offset - 0x1000;
+      memcpy(lh->keys[pos].hash, old_hash, 4);
+      old_key_index++;
+      if (old_key_index < nr_keys) {
+	get_offset_and_hash(h, old_key_index, old_lf, old_li, &old_offset, old_hash);
+      }
+    }
+  }
+  free(old_hash);
+  mark_block_unused(h, old_offs);
+  return offset;
+}
+
+/* This will create a new lh record that inserts all new nkoffsets to the existing
+blocks in alphabetically sorted order. A new lh offset is created for this.
+ */
+static int
+insert_subkeys(hive_h *h, size_t parent, size_t *nkoffsets,
+	       const char** names, int num_subkeys, size_t *blocks)
+{
+  size_t start_pos = 0, end_pos = 0;
+  hive_node_h last_offset = 0;
+  size_t old_offs = 0, new_offs = 0;
+
+  assert (blocks[0]!=0);
+  // For each block in blocks:
+  for (int i = 0; blocks[i]!=0; ++i) {
+    struct ntreg_lf_record *old_lf = NULL;
+    struct ntreg_ri_record *old_li = NULL;
+    char *last_name = NULL;
+    uint16_t num_keys = 0;
+
+    DEBUG(2, "Looking at block %u", i);
+    // Get last item
+    if (block_id_eq (h, blocks[i], "lf") || block_id_eq (h, blocks[i], "lh")) {
+      old_offs = blocks[i];
+      old_lf = (struct ntreg_lf_record *) ((char *) h->addr + old_offs);
+      old_li = NULL;
+      num_keys = le16toh(old_lf->nr_keys);
+      last_offset = old_lf->keys[num_keys-1].offset + 0x1000;
+    } else if (block_id_eq (h, blocks[i], "li")) {
+      old_offs = blocks[i];
+      old_li = (struct ntreg_ri_record *) ((char *) h->addr + old_offs);
+      old_lf = NULL;
+      num_keys = le16toh(old_li->nr_offsets);
+      last_offset = old_li->offset[num_keys-1] + 0x1000;
+    }
+    DEBUG(2, "Block has %u keys", num_keys);
+    DEBUG(2, "Last offset of block is 0x%zx", last_offset);
+    last_name = hivex_node_name (h, last_offset);
+    DEBUG(2, "Name of last block is %s", last_name);
+    for (int j = start_pos; j < num_subkeys; j++){
+      DEBUG(2, "Comparing with name %s", names[j]);
+      if(strcasecmp (last_name, names[j]) > 0) {
+	DEBUG(2, "This will go to the next block (if exists)");
+	end_pos = j;
+	break;
+      }
+      DEBUG(2, "This node belongs in this list");
+    }
+    // If this is the last block, throw everything in
+    if (blocks[i+1] == 0) {
+      DEBUG(2, "This is the last block, throwing every node in");
+      end_pos = num_subkeys;
+    }
+    DEBUG(2, "Moving all nodes from %zu to %zu to block number %u", start_pos, end_pos, i);
+    // Add entries here
+    if (num_keys + end_pos - start_pos >= UINT16_MAX) {
+      //todo: maybe create another lh record?
+      // would have to create another RI record and rearrange LH blocks
+      SET_ERRNO (EOVERFLOW,
+		 "cannot extend record because it already contains the maximum number of subkeys (%zu)",
+		 (size_t) num_keys);
+      return -1;
+    }
+    new_offs = _fresh_lh_block(h, old_offs, names, nkoffsets, start_pos, end_pos);
+    if (new_offs == 0) {
+      DEBUG(2, "Failed to create new merged LH block");
+      return -1;
+    }
+    start_pos = end_pos;
+
+    assert (old_lf || old_li);
+    assert (!(old_lf && old_li));
+
+    struct ntreg_nk_record *parent_nk =
+      (struct ntreg_nk_record *) ((char *) h->addr + parent);
+
+    /* Since the lf/lh/li-record has moved, now we have to find the old
+     * reference to it and update it.  It might be referenced directly
+     * from the parent_nk->subkey_lf, or it might be referenced
+     * indirectly from some ri-record in blocks[].  Since we can update
+     * either of these in-place, we don't need to do this recursively.
+     */
+    if (le32toh (parent_nk->subkey_lf) + 0x1000 == old_offs) {
+      DEBUG (2, "replacing parent_nk->subkey_lf 0x%zx -> 0x%zx",
+	     old_offs, new_offs);
+      parent_nk->subkey_lf = htole32 (new_offs - 0x1000);
+    }
+    else {
+      for (size_t block_num = 0; blocks[block_num] != 0; ++block_num) {
+	if (block_id_eq (h, blocks[block_num], "ri")) {
+	  struct ntreg_ri_record *ri =
+	    (struct ntreg_ri_record *) ((char *) h->addr + blocks[block_num]);
+	  for (size_t offset_num = 0; offset_num < le16toh (ri->nr_offsets); ++offset_num)
+	    if (le32toh (ri->offset[offset_num]) + 0x1000 == old_offs) {
+	      DEBUG (2, "replacing ri (0x%zx) ->offset[%zu] 0x%zx -> 0x%zx",
+		     blocks[block_num], offset_num, old_offs, new_offs);
+	      ri->offset[offset_num] = htole32 (new_offs - 0x1000);
+	      goto found_it;
+	    }
+	}
+      }
+      /* Not found ..  This is an internal error. */
+      SET_ERRNO (ENOTSUP, "could not find ri->lf link");
+      return -1;
+    }
+    found_it:;
+  }
+  return 0;
+}
+
+hive_node_h
+_insert_children(hive_h *h, hive_node_h parent, hive_node_h *nkoffsets, const char **names, int num_children){
+  hive_node_h *unused;
+  size_t *blocks;
+
+  if (_hivex_get_children (h, parent, &unused, &blocks, 0) == -1)
+    return -1;
+  free(unused);
+
+  size_t i;
+  struct ntreg_nk_record *parent_nk =
+    (struct ntreg_nk_record *) ((char *) h->addr + parent);
+
+  size_t nr_subkeys_in_parent_nk = le32toh (parent_nk->nr_subkeys);
+  DEBUG(2, "Parent currently contains %zu keys", nr_subkeys_in_parent_nk);
+  if (nr_subkeys_in_parent_nk == UINT32_MAX) {
+    free (blocks);
+    SET_ERRNO (EOVERFLOW,
+               "too many subkeys (%zu)", nr_subkeys_in_parent_nk);
+    return -1;
+  }
+
+  if (nr_subkeys_in_parent_nk == 0) { /* No subkeys case. */
+    /* Free up any existing intermediate blocks. */
+    for (i = 0; blocks[i] != 0; ++i)
+      mark_block_unused (h, blocks[i]);
+    size_t lh_offs = new_lh_record_with_children (h, nkoffsets, names, num_children);
+    if (lh_offs == 0) {
+      DEBUG(2, "Failed to create new LH record with children");
+      free (blocks);
+      return -1;
+    }
+    /* Recalculate pointers that could have been invalidated by
+     * previous call to allocate_block (via new_lh_record).
+     */
+    /* nk could be invalid here */
+    parent_nk = (struct ntreg_nk_record *) ((char *) h->addr + parent);
+    DEBUG (2, "no keys, allocated new lh-record at 0x%zx", lh_offs);
+    parent_nk->subkey_lf = htole32 (lh_offs - 0x1000);
+  }
+  else {                        /* Insert subkeys case. */
+    if (insert_subkeys (h, parent, nkoffsets, names, num_children, blocks) == -1) {
+      free (blocks);
+      return -1;
+    }
+    /* Recalculate pointers that could have been invalidated by
+     * previous call to allocate_block (via new_lh_record).
+     */
+    /* nk could be invalid here */
+    parent_nk = (struct ntreg_nk_record *) ((char *) h->addr + parent);
+  }
+
+  free (blocks);
+
+  /* Update nr_subkeys in parent nk. */
+  nr_subkeys_in_parent_nk+=num_children;
+  parent_nk->nr_subkeys = htole32 (nr_subkeys_in_parent_nk);
+
+  return 0;
+}
+
+int
+hivex_node_delete_siblings(hive_h *h, hive_node_h parent, hive_node_h* nodes, int num_nodes){
+  for(int i=0;i<num_nodes;i++) {
+    DEBUG(2, "Child: 0x%zx\n", nodes[i]);
+  }
+  return 0;
+}
+
+int
+hivex_node_add_children(hive_h *h, hive_node_h parent, const char **names, int num_names){
+  hive_node_h *nkoffsets = malloc(sizeof(hive_node_h*) * num_names);
+  DEBUG(2,"Creating children");
+  for(int i=0; i<num_names; i++){
+    hive_node_h offset = _create_nk_record(h, parent, names[i]);
+    if (offset == 0) {
+      DEBUG(2, "Failed to create NK record for %s", names[i]);
+      return -1;
+    }
+    nkoffsets[i] = offset;
+    DEBUG(2, "Child NK record at 0x%zx", nkoffsets[i]);
+  }
+  DEBUG(2,"Inserting children");
+  size_t ret = _insert_children(h, parent, nkoffsets, names, num_names);
+  free(nkoffsets);
+  return ret;
+}
