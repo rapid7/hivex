@@ -13,7 +13,7 @@ info:
   x-cortex-domain-parents:
   - tag: endpoint-prism
   x-cortex-groups:
-  - exposure:external-ship
+  - exposure:opensource
   - target:opensource
 openapi: 3.0.1
 servers:
