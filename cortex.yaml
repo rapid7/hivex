@@ -14,7 +14,7 @@ info:
   - tag: endpoint-prism
   x-cortex-groups:
   - exposure:opensource
-  - target:opensource
+  - target:library
 openapi: 3.0.1
 servers:
 - url: "/"
